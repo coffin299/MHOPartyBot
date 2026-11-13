@@ -1,0 +1,12 @@
+# Copy of this file is created as config.yaml on the first launch.
+# Edit config.yaml. This default file stays as the template.
+
+# Bot token from the Discord Developer Portal.
+discord_token: ""
+
+# SQLite file. A relative path is resolved from the project folder.
+database_path: data/party.db
+
+# Guild ID for instant command sync while developing.
+# Leave null to sync commands globally.
+dev_guild_id: null
