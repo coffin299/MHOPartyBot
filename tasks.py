@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from discord.ext import commands, tasks
 
@@ -14,12 +14,25 @@ from views import close_card, database_from, refresh_board
 
 logger = logging.getLogger(__name__)
 
-# リセット時刻の基準。日曜の曜日番号は 6。
-JST = ZoneInfo("Asia/Tokyo")
+# 日曜の曜日番号は 6。
 SUNDAY = 6
 
 # 起動時の確認と、0:00 のタスクが重なっても削除は1回にする。
 _purge_lock = asyncio.Lock()
+
+
+def _japan_time() -> tzinfo:
+    """日曜 0:00 に使う日本時間。データが無い Windows では UTC+9 を使う。"""
+    try:
+        # tzdata がある環境では、地域名のタイムゾーンを使う。
+        return ZoneInfo("Asia/Tokyo")
+    except ZoneInfoNotFoundError:
+        # 日本に夏時間は無いので、固定の UTC+9 でも同じ時刻になる。
+        return timezone(timedelta(hours=9))
+
+
+# 日曜 0:00 の判定に使う日本時間。
+JST = _japan_time()
 
 
 def most_recent_sunday(now: datetime) -> date:

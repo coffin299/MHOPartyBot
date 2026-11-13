@@ -77,7 +77,7 @@ dev_guild_id: null
 - `database_path` を空にすると `data/party.db` を使います。
 - `dev_guild_id` にサーバーIDを入れると、そのサーバーだけへコマンドを即時同期します。`null` ならグローバル同期で、反映まで最大1時間ほどかかることがあります。開発中にコマンドが二重に出るときは、Developer Portal 側のグローバルコマンドを消してから、ギルドIDを指定して再起動してください。
 
-`start.bat` は `python -B` で起動します。`__pycache__` は作りません。
+`start.bat` は `python -B` で起動します。`__pycache__` は作りません。Windows では日本時間のために `tzdata` も入ります。入らなくても、日曜 0:00 は UTC+9 で判定します。
 
 ## ファイル
 
