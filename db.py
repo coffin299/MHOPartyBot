@@ -236,6 +236,18 @@ class Database:
             (party_id, user_id),
         )
 
+    def update_note(
+        self,
+        conn: sqlite3.Connection,
+        party_id: int,
+        note: str | None,
+    ) -> None:
+        """募集のメモだけを差し替える。名前とリーダーは変えない。"""
+        conn.execute(
+            "UPDATE parties SET note = ? WHERE id = ?",
+            (note, party_id),
+        )
+
     def update_leader(
         self,
         conn: sqlite3.Connection,

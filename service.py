@@ -1,4 +1,4 @@
-"""パーティの作成、参加、退出、移譲、削除。"""
+"""パーティの作成、参加、退出、移譲、メモ更新、削除。"""
 
 from __future__ import annotations
 
@@ -61,6 +61,15 @@ class DeleteStatus(Enum):
     NOT_FOUND = "not_found"
 
 
+class ModifyStatus(Enum):
+    """メモ更新の結果。今のリーダーだけが編集できる。"""
+
+    UPDATED = "updated"
+    NOT_FOUND = "not_found"
+    NOTE_TOO_LONG = "note_too_long"
+    MULTIPLE = "multiple"
+
+
 @dataclass(frozen=True)
 class CreateOutcome:
     """作成に成功したときだけ party を持つ。"""
@@ -92,6 +101,14 @@ class DeleteOutcome:
     """削除した募集のカードを閉じるためのスナップショット。"""
 
     status: DeleteStatus
+    party: Party | None
+
+
+@dataclass(frozen=True)
+class ModifyOutcome:
+    """メモを更新したあとの募集。失敗時は party を持たない。"""
+
+    status: ModifyStatus
     party: Party | None
 
 
@@ -247,6 +264,34 @@ def leave_party(
     )
 
 
+def modify_note(
+    database: Database,
+    *,
+    guild_id: int,
+    user_id: int,
+    note: str | None,
+) -> ModifyOutcome:
+    """今のリーダーが、メモだけを書き換える。空欄はメモなしにする。"""
+    cleaned_note = _clean_note(note)
+    # 表示が崩れる長さは、作成時と同じ基準で拒む。
+    if cleaned_note is not None and len(cleaned_note) > NOTE_MAX:
+        return ModifyOutcome(ModifyStatus.NOTE_TOO_LONG, None)
+    with database.transaction() as conn:
+        parties = database.load_parties_for_guild(conn, guild_id)
+        # 移譲後は新しいリーダーだけがメモを編集できる。
+        editable = [party for party in parties if party.leader_id == user_id]
+        # リーダーをしている募集がこのサーバーに無い。
+        if not editable:
+            return ModifyOutcome(ModifyStatus.NOT_FOUND, None)
+        # リーダーが複数の募集にいるときは、どれを更新するか決められない。
+        if len(editable) > 1:
+            return ModifyOutcome(ModifyStatus.MULTIPLE, None)
+        party = editable[0]
+        database.update_note(conn, party.id, cleaned_note)
+        updated = database.load_party(conn, party.id)
+    return ModifyOutcome(ModifyStatus.UPDATED, updated)
+
+
 def delete_created_party(
     database: Database,
     *,
@@ -324,6 +369,19 @@ def leave_text(status: LeaveStatus) -> str:
     if status is LeaveStatus.WRONG_GUILD:
         return "別のサーバーのパーティです。"
     return "退出できませんでした。"
+
+
+def modify_text(status: ModifyStatus) -> str:
+    """メモ更新の結果文言。成功も失敗も実行者だけに返す。"""
+    if status is ModifyStatus.UPDATED:
+        return "メモを更新しました。"
+    if status is ModifyStatus.NOT_FOUND:
+        return "リーダーをしているパーティがありません。"
+    if status is ModifyStatus.NOTE_TOO_LONG:
+        return f"メモは{NOTE_MAX}文字以内にしてください。"
+    if status is ModifyStatus.MULTIPLE:
+        return "リーダーのパーティが複数あります。1件だけにしてから実行してください。"
+    return "メモを更新できませんでした。"
 
 
 def delete_text(status: DeleteStatus) -> str:

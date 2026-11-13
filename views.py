@@ -286,6 +286,28 @@ async def refresh_board(client: discord.Client, guild_id: int) -> None:
         database.delete_board(guild_id)
 
 
+async def remove_placed_board(client: discord.Client, guild_id: int) -> bool:
+    """このサーバーの掲示板メッセージを消し、紐付けも外す。無ければ False。"""
+    database = database_from(client)
+    board = database.get_board(guild_id)
+    # 未設置のサーバーでは、消すメッセージが無い。
+    if board is None:
+        return False
+    channel = await _messageable(client, board.channel_id)
+    # チャンネルが残っているときだけ、貼ってあるメッセージを消す。
+    if channel is not None:
+        for message_id in board.message_ids:
+            await _delete_partial(channel, message_id)
+    else:
+        logger.warning(
+            "掲示板のチャンネルが無いため、メッセージは消せませんでした: %s",
+            board.channel_id,
+        )
+    # メッセージが残っていても、このサーバーの掲示板としては忘れる。
+    database.delete_board(guild_id)
+    return True
+
+
 async def place_board(
     client: discord.Client,
     *,

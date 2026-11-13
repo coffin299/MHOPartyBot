@@ -12,6 +12,7 @@ from service import (
     REASON_CREATOR,
     CreateStatus,
     DeleteStatus,
+    ModifyStatus,
     attach_card_message,
     create_party,
     create_text,
@@ -20,15 +21,19 @@ from service import (
     discard_party,
     guild_lock,
     list_parties,
+    modify_note,
+    modify_text,
 )
 from views import (
     MENTIONS,
     build_card,
     build_list_view,
     close_card,
+    edit_card,
     database_from,
     place_board,
     refresh_board,
+    remove_placed_board,
     reply_ephemeral,
 )
 
@@ -36,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 class PartyCog(commands.Cog):
-    """4人パーティの作成、削除、一覧、掲示板。"""
+    """4人パーティの作成、メモ編集、削除、一覧、掲示板。"""
 
     party = app_commands.Group(name="party", description="4人パーティの募集")
 
@@ -100,6 +105,30 @@ class PartyCog(commands.Cog):
                 attach_card_message(database, party.id, message.id)
             except discord.HTTPException:
                 logger.exception("パーティカードを紐付けできませんでした: %s", party.id)
+            await refresh_board(self.bot, guild_id)
+
+    @party.command(name="modify", description="リーダーがメモを編集する")
+    @app_commands.describe(note="新しいメモ。空にするとメモを消します（300文字以内）")
+    @app_commands.guild_only()
+    async def modify(self, interaction: discord.Interaction, note: str) -> None:
+        """今のリーダーだけがメモを書き換える。返事は本人だけ。"""
+        guild_id = interaction.guild_id
+        if guild_id is None or interaction.user is None:
+            await reply_ephemeral(interaction, "サーバーの中で実行してください。")
+            return
+        async with guild_lock(guild_id):
+            outcome = modify_note(
+                database_from(self.bot),
+                guild_id=guild_id,
+                user_id=interaction.user.id,
+                note=note,
+            )
+            # 成否は実行者だけに見せる。
+            await reply_ephemeral(interaction, modify_text(outcome.status))
+            # 更新できたときだけ、公開カードと掲示板のメモを描き直す。
+            if outcome.status is not ModifyStatus.UPDATED or outcome.party is None:
+                return
+            await edit_card(self.bot, outcome.party)
             await refresh_board(self.bot, guild_id)
 
     @party.command(name="delete", description="自分が作成したパーティを削除する")
@@ -173,6 +202,24 @@ class PartyCog(commands.Cog):
                 )
                 return
         await reply_ephemeral(interaction, "掲示板をこのチャンネルに設置しました。")
+
+    @party.command(name="board-delete", description="このサーバーのパーティ掲示板を削除する")
+    @app_commands.guild_only()
+    async def board_delete(self, interaction: discord.Interaction) -> None:
+        """掲示板だけを消す。募集は残し、返事は実行した人だけに見せる。"""
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            await reply_ephemeral(interaction, "サーバーの中で実行してください。")
+            return
+        # 複数枚の削除が3秒を超えてもよいように、先に受ける。
+        await interaction.response.defer(ephemeral=True)
+        async with guild_lock(guild_id):
+            # 今いるサーバーの掲示板だけを対象にする。
+            removed = await remove_placed_board(self.bot, guild_id)
+        if not removed:
+            await reply_ephemeral(interaction, "このサーバーに掲示板はありません。")
+            return
+        await reply_ephemeral(interaction, "掲示板を削除しました。")
 
     async def cog_app_command_error(
         self,
