@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 # ユーザーメンションだけ展開し、everyone と役職メンションは鳴らさない。
 MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True)
 
-# 募集中カードの色と、解散後の色。
-ACCENT_COLOUR = 0x5865F2
+# 空き、満員、解散、募集ゼロで枠の色を変える。
+OPEN_COLOUR = 0x5865F2
+FULL_COLOUR = 0xED4245
 CLOSED_COLOUR = 0xED4245
+EMPTY_COLOUR = 0x4F545C
 
-# 1メッセージ40コンポーネントのうち、見出し1 + パーティ6件（各5）で31に収める。
-PARTIES_PER_BOARD_MESSAGE = 6
+# Components V2 は1メッセージ40部品まで。
+MAX_COMPONENTS = 40
 
 # TextDisplay 全体の上限4000に、末尾の省略文を足しても超えない目安。
 LIST_CHAR_BUDGET = 3800
@@ -72,10 +74,16 @@ class JoinButton(
 ):
     """再起動後も `party:join:{id}` を受け取る参加ボタン。"""
 
-    def __init__(self, party_id: int, *, disabled: bool = False) -> None:
+    def __init__(
+        self,
+        party_id: int,
+        *,
+        member_count: int,
+        disabled: bool = False,
+    ) -> None:
         super().__init__(
             ui.Button(
-                label="参加",
+                label=f"参加 {member_count}/{PARTY_LIMIT}",
                 style=discord.ButtonStyle.success,
                 custom_id=f"party:join:{party_id}",
                 disabled=disabled,
@@ -94,7 +102,8 @@ class JoinButton(
         # 再構築にインタラクション本体は要らない。ID は custom_id にある。
         del interaction
         disabled = bool(getattr(item, "disabled", False))
-        return cls(int(match.group("party_id")), disabled=disabled)
+        # 押した瞬間のラベルは使わず、成功後にデータベースから描き直す。
+        return cls(int(match.group("party_id")), member_count=0, disabled=disabled)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """参加処理へ渡す。"""
@@ -137,7 +146,7 @@ class LeaveButton(
 def build_card(party: Party) -> ui.LayoutView:
     """公開チャンネルに置く、1パーティ分のカード。"""
     view = ui.LayoutView(timeout=None)
-    view.add_item(_party_container(party))
+    view.add_item(_party_container(party, with_buttons=True))
     return view
 
 
@@ -146,7 +155,9 @@ def build_closed_view(name: str, reason: str) -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     view.add_item(
         ui.Container(
-            ui.TextDisplay(f"# {sanitize(name)}\n{reason}"),
+            ui.TextDisplay(f"# {sanitize(name)}"),
+            _separator(),
+            ui.TextDisplay(reason),
             accent_colour=CLOSED_COLOUR,
         )
     )
@@ -154,55 +165,79 @@ def build_closed_view(name: str, reason: str) -> ui.LayoutView:
 
 
 def build_list_view(parties: list[Party]) -> ui.LayoutView:
-    """このギルドの読み取り専用一覧。ボタンは付けない。"""
+    """このギルドの読み取り専用一覧。募集ごとに枠を分ける。"""
     intro = (
         "# パーティ一覧\n"
         "このサーバーで募集中のパーティです。\n"
         "参加と退出は、パーティのカードか掲示板から行えます。"
     )
-    # 募集が無いときは空表示だけを返す。
-    if not parties:
-        body = intro + "\n\n現在募集中のパーティはありません。"
-    else:
-        body, hidden = _fit_parties(intro, parties)
-        # 文字数に収まらなかった残りは、掲示板側で見てもらう。
-        if hidden:
-            suffix = f"\n\n他 {hidden} 件は掲示板で確認してください。"
-            if len(body) + len(suffix) <= 4000:
-                body += suffix
     view = ui.LayoutView()
-    view.add_item(
-        ui.Container(
-            ui.TextDisplay(body),
-            accent_colour=ACCENT_COLOUR,
+    # 募集が無いときは、灰色の枠一つで空表示にする。
+    if not parties:
+        view.add_item(
+            ui.Container(
+                ui.TextDisplay(intro + "\n\n現在募集中のパーティはありません。"),
+                accent_colour=EMPTY_COLOUR,
+            )
         )
-    )
+        return view
+    view.add_item(ui.TextDisplay(intro))
+    used_components = 1
+    used_chars = len(intro)
+    hidden = 0
+    for index, party in enumerate(parties):
+        container = _party_container(party, with_buttons=False)
+        cost = container._total_count
+        chars = _party_char_length(party)
+        # 省略案内を足せる余白を残し、40部品と4000文字を超えない。
+        if used_components + cost > MAX_COMPONENTS - 1 or used_chars + chars > LIST_CHAR_BUDGET:
+            hidden = len(parties) - index
+            break
+        view.add_item(container)
+        used_components += cost
+        used_chars += chars
+    if hidden:
+        suffix = f"他 {hidden} 件は掲示板で確認してください。"
+        if used_components < MAX_COMPONENTS and used_chars + len(suffix) <= 4000:
+            view.add_item(ui.TextDisplay(suffix))
     return view
 
 
 def build_board_views(parties: list[Party]) -> list[ui.LayoutView]:
-    """掲示板を、コンポーネント上限に収まるメッセージ単位へ分ける。"""
+    """掲示板を、40部品に収まるメッセージ単位へ分ける。"""
     # 空でもメッセージは残し、あとから編集できるようにする。
     if not parties:
         view = ui.LayoutView(timeout=None)
         view.add_item(
             ui.Container(
                 ui.TextDisplay(_empty_board_text()),
-                accent_colour=ACCENT_COLOUR,
+                accent_colour=EMPTY_COLOUR,
             )
         )
         return [view]
-    pages = [
-        parties[index : index + PARTIES_PER_BOARD_MESSAGE]
-        for index in range(0, len(parties), PARTIES_PER_BOARD_MESSAGE)
-    ]
+    pages: list[list[ui.Container]] = []
+    current: list[ui.Container] = []
+    # 各ページの先頭に見出しを1部品置く。
+    used = 1
+    for party in parties:
+        container = _party_container(party, with_buttons=True)
+        cost = container._total_count
+        # この1件を足すと上限を超えるなら、次のメッセージへ回す。
+        if current and used + cost > MAX_COMPONENTS:
+            pages.append(current)
+            current = []
+            used = 1
+        current.append(container)
+        used += cost
+    if current:
+        pages.append(current)
     views: list[ui.LayoutView] = []
     for page_index, page in enumerate(pages):
         view = ui.LayoutView(timeout=None)
         # 2枚目以降も、単体で見て掲示板だと分かる見出しを置く。
         view.add_item(ui.TextDisplay(_board_header(len(parties), page_index)))
-        for party in page:
-            view.add_item(_party_container(party))
+        for container in page:
+            view.add_item(container)
         views.append(view)
     return views
 
@@ -343,24 +378,29 @@ def sanitize(value: str) -> str:
     return neutralized.replace("<@&", "<@\u200b&")
 
 
-def party_text(party: Party) -> str:
-    """1パーティ分の本文。リーダーと作成者が違うときだけ作成者を出す。"""
-    lines = [f"# {sanitize(party.name)}"]
-    # メモが無い募集は、見出しの次をリーダーにする。
-    if party.note:
-        lines.append(sanitize(party.note))
-    lines.append(f"リーダー: <@{party.leader_id}>")
-    # 移譲後でないと、作成者とリーダーは同じ人なので繰り返さない。
+def _status_text(party: Party) -> str:
+    """リーダー、作成者、メンバー一覧。作成者とリーダーが同じなら作成者は出さない。"""
+    lines = [f"**リーダー** <@{party.leader_id}>"]
+    # 移譲後だけ、削除権を持つ作成者を別に出す。
     if party.leader_id != party.creator_id:
-        lines.append(f"作成者: <@{party.creator_id}>")
-    lines.append(f"メンバー（{len(party.members)}/{PARTY_LIMIT}）")
+        lines.append(f"**作成者** <@{party.creator_id}>")
+    lines.append(f"**メンバー** {len(party.members)}/{PARTY_LIMIT}")
     for member in _ordered_members(party):
-        # 先頭のリーダー行と、一覧の中のリーダーを両方残す。
+        # 一覧の先頭がリーダーだと、一目で分かるようにする。
         if member.user_id == party.leader_id:
-            lines.append(f"- <@{member.user_id}>（リーダー）")
+            lines.append(f"- <@{member.user_id}> リーダー")
         else:
             lines.append(f"- <@{member.user_id}>")
     return "\n".join(lines)
+
+
+def _party_char_length(party: Party) -> int:
+    """一覧の文字数制限に使う、この募集の表示文字数。"""
+    length = len(sanitize(party.name)) + len(_status_text(party))
+    # メモがあるときだけ、引用の分を足す。
+    if party.note:
+        length += len(sanitize(party.note))
+    return length
 
 
 def clear_missing_card(client: discord.Client, party_id: int) -> None:
@@ -436,18 +476,43 @@ async def _handle_leave(interaction: discord.Interaction, party_id: int) -> None
             )
 
 
-def _party_container(party: Party) -> ui.Container:
-    """パーティ本文と、参加・退出ボタンを1つの枠にまとめる。"""
-    full = len(party.members) >= PARTY_LIMIT
-    return ui.Container(
-        ui.TextDisplay(party_text(party)),
-        ui.ActionRow(
-            # 満員のときは押せなくするが、退出は残す。
-            JoinButton(party.id, disabled=full),
-            LeaveButton(party.id),
-        ),
-        accent_colour=ACCENT_COLOUR,
-    )
+def _separator() -> ui.Separator:
+    """見出し、メモ、メンバーの間に置く細い区切り。"""
+    return ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small)
+
+
+def _party_colour(party: Party) -> int:
+    """空きは青、満員は赤。"""
+    if len(party.members) >= PARTY_LIMIT:
+        return FULL_COLOUR
+    return OPEN_COLOUR
+
+
+def _party_container(party: Party, *, with_buttons: bool) -> ui.Container:
+    """見出し、メモ、メンバーを区切った枠。ボタンはカードと掲示板だけに付ける。"""
+    children: list[ui.Item] = [
+        ui.TextDisplay(f"# {sanitize(party.name)}"),
+        _separator(),
+    ]
+    # メモが無い募集は、空の引用を置かずにメンバーへ進む。
+    if party.note:
+        children.append(ui.TextDisplay(f"> {sanitize(party.note)}"))
+        children.append(_separator())
+    children.append(ui.TextDisplay(_status_text(party)))
+    if with_buttons:
+        full = len(party.members) >= PARTY_LIMIT
+        children.append(
+            ui.ActionRow(
+                # 満員のときは押せなくするが、人数はラベルに残す。
+                JoinButton(
+                    party.id,
+                    member_count=len(party.members),
+                    disabled=full,
+                ),
+                LeaveButton(party.id),
+            )
+        )
+    return ui.Container(*children, accent_colour=_party_colour(party))
 
 
 def _ordered_members(party: Party) -> list[Member]:
@@ -460,20 +525,6 @@ def _ordered_members(party: Party) -> list[Member]:
             member.user_id,
         ),
     )
-
-
-def _fit_parties(intro: str, parties: list[Party]) -> tuple[str, int]:
-    """一覧の本文と、文字数制限で落とす件数を返す。"""
-    body = intro
-    hidden = 0
-    for index, party in enumerate(parties):
-        piece = "\n\n" + party_text(party)
-        # この1件を足すと上限を超えるなら、ここから先は掲示板へ回す。
-        if len(body) + len(piece) > LIST_CHAR_BUDGET:
-            hidden = len(parties) - index
-            break
-        body += piece
-    return body, hidden
 
 
 def _empty_board_text() -> str:
