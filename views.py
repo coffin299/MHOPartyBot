@@ -388,9 +388,13 @@ def _status_text(party: Party) -> str:
     for member in _ordered_members(party):
         # 一覧の先頭がリーダーだと、一目で分かるようにする。
         if member.user_id == party.leader_id:
-            lines.append(f"- <@{member.user_id}> リーダー")
+            lines.append(f"- <@{member.user_id}>（リーダー）")
         else:
             lines.append(f"- <@{member.user_id}>")
+    open_slots = PARTY_LIMIT - len(party.members)
+    # 定員までの残りは、空いている枠として同じ一覧に出す。
+    for _ in range(max(open_slots, 0)):
+        lines.append("- 空き")
     return "\n".join(lines)
 
 
